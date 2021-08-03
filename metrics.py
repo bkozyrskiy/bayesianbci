@@ -18,7 +18,7 @@ def elbo(logits, targets, kl, beta, beta_type, datasize):
         if beta_type == "Blundell":
             return -softmax_log_likelihood(logits, targets).sum(dim=0) + beta * kl
         elif beta_type is None:
-            return -softmax_log_likelihood(logits, targets).mean(dim=0) * datasize + beta * kl
+            return -softmax_log_likelihood(logits, targets).mean(dim=0)  + beta * kl/datasize
 
 
 def KL_DIV(mu_q, sig_q, mu_p, sig_p):
@@ -38,7 +38,7 @@ def get_beta(batch_idx, n_batches, beta_type, epoch, num_epochs):
     elif beta_type == "Standard":
         beta = 1 / n_batches
     else:
-        beta = 0
+        beta = 1
     return beta
 
 

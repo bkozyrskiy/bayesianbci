@@ -1,4 +1,4 @@
-
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
@@ -12,6 +12,70 @@ def square(x):
 def safe_log(x, eps=1e-6):
     """ Prevents :math:`log(0)` by using :math:`log(max(x, eps))`."""
     return torch.log(torch.clamp(x, min=eps))
+
+def identity(x):
+    return x
+
+class AvgPool2dWithConv(torch.nn.Module):
+    """
+    Compute average pooling using a convolution, to have the dilation parameter.
+    Parameters
+    ----------
+    kernel_size: (int,int)
+        Size of the pooling region.
+    stride: (int,int)
+        Stride of the pooling operation.
+    dilation: int or (int,int)
+        Dilation applied to the pooling filter.
+    padding: int or (int,int)
+        Padding applied before the pooling operation.
+    """
+
+    def __init__(self, kernel_size, stride, dilation=1, padding=0):
+        super(AvgPool2dWithConv, self).__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.dilation = dilation
+        self.padding = padding
+        # don't name them "weights" to
+        # make sure these are not accidentally used by some procedure
+        # that initializes parameters or something
+        self._pool_weights = None
+
+    def forward(self, x):
+        # Create weights for the convolution on demand:
+        # size or type of x changed...
+        in_channels = x.size()[1]
+        weight_shape = (
+            in_channels,
+            1,
+            self.kernel_size[0],
+            self.kernel_size[1],
+        )
+        if self._pool_weights is None or (
+            (tuple(self._pool_weights.size()) != tuple(weight_shape))
+            or (self._pool_weights.is_cuda != x.is_cuda)
+            or (self._pool_weights.data.type() != x.data.type())
+        ):
+            n_pool = np.prod(self.kernel_size)
+            weights = torch.Tensor(
+                np.ones(weight_shape, dtype=np.float32) / float(n_pool)
+            )
+            weights = weights.type_as(x)
+            if x.is_cuda:
+                weights = weights.cuda()
+            self._pool_weights = weights
+
+        pooled = F.conv2d(
+            x,
+            self._pool_weights,
+            bias=None,
+            stride=self.stride,
+            dilation=self.dilation,
+            padding=self.padding,
+            groups=in_channels,
+        )
+        return pooled
 
 class ModuleWrapper(nn.Module):
     """Wrapper for nn.Module with support for arbitrary flags and a universal forward pass"""
@@ -45,7 +109,7 @@ class ModuleWrapper(nn.Module):
 
 class BBBConv2d(ModuleWrapper):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
-                 padding=0, dilation=1, bias=True, priors=None):
+                 padding=0, dilation=1, bias=True, priors=None, init_with_prior=False):
         super(BBBConv2d, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -79,15 +143,24 @@ class BBBConv2d(ModuleWrapper):
             self.register_parameter('bias_mu', None)
             self.register_parameter('bias_rho', None)
 
-        self.reset_parameters()
+        self.reset_parameters(init_with_prior)
 
-    def reset_parameters(self):
-        self.W_mu.data.normal_(*self.posterior_mu_initial)
-        self.W_rho.data.normal_(*self.posterior_rho_initial)
+    def reset_parameters(self, init_with_prior):
+        if init_with_prior:
+            sigma2rho = lambda x: np.log(np.expm1(x))
+            self.W_mu.data.fill_(self.prior_mu)
+            self.W_rho.data.fill_(sigma2rho(self.prior_sigma))
 
-        if self.use_bias:
-            self.bias_mu.data.normal_(*self.posterior_mu_initial)
-            self.bias_rho.data.normal_(*self.posterior_rho_initial)
+            if self.use_bias:
+                self.bias_mu.data.fill_(self.prior_mu)
+                self.bias_rho.data.fill_(sigma2rho(self.prior_sigma))
+        else:
+            self.W_mu.data.normal_(*self.posterior_mu_initial)
+            self.W_rho.data.normal_(*self.posterior_rho_initial)
+
+            if self.use_bias:
+                self.bias_mu.data.normal_(*self.posterior_mu_initial)
+                self.bias_rho.data.normal_(*self.posterior_rho_initial)
 
     def forward(self, x):
 

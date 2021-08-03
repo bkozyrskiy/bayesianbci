@@ -1,19 +1,24 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-# from datasets import get_data, get_dataloaders
-from utils import Expression, reliability_plot, _ECELoss, test_on_ood
-
-from moabb_dataset import get_dataloaders
 import numpy as np
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from layers import square, safe_log
-import argparse
 
 
+
+# import argparse
+
+import os, sys
+PACKAGE_PARENT = '..'
+SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
+sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
+from utils import Expression, test_on_ood
+from dataloaders.bcic2a_dataset import get_dataloaders
+from models.layers import square, safe_log, AvgPool2dWithConv
 
 
 class ShallowModel(nn.Module):
+    '''Receives an input (trials x channels x time)'''
+    
     def __init__(self, in_chans, input_time_length, n_classes, n_filters_time=40, 
                  filter_time_length=25, n_filters_spat=40, pool_time_length=75, pool_time_stride=15, conv_nonlin=None, pool_nonlin=None) -> None:
         super(ShallowModel, self).__init__()
@@ -40,6 +45,9 @@ class ShallowModel(nn.Module):
     def forward(self, x):
         return self.model(x)
     
+
+
+
 class Trainer():
     def __init__(self, model, optim, scheduler, train_dataloader, test_dataloader, device, verbose=False) -> None:
         self.model = model
@@ -89,8 +97,8 @@ class Trainer():
                 train_loss.backward()
                 self.optim.step()
                 self.scheduler.step()
-                losses_train.append(train_loss) 
-                errors_train.append(train_error)
+                losses_train.append(train_loss.item()) 
+                errors_train.append(train_error.item())
                 
             if epoch % test_interval == 0:
                 test_loss, test_error = self.test()
@@ -99,48 +107,69 @@ class Trainer():
                 print('TEST: epoch %d, loss %f, error %f' %(epoch, test_loss, test_error))
         return losses_train, errors_train, losses_test, errors_test
 
-
-    
-        
+# def test_models(models, dataloader, n_classes, device):
+#     for idx,model in enumerate(models):
+#         model.eval()
+#         model.to(device)
+#         n_trials = len(dataloader.dataset)
+#         probs_test = torch.empty(len(models),n_trials,n_classes)
+#         with torch.no_grad():
+#             test_loss, test_error = 0,0
+#             start = 0 
+#             y = torch.empty(n_trials, device=device)
+#             for test_data in dataloader:
+#                 x_batch, y_batch = test_data[0], test_data[1]
+#                 x_batch = (x_batch.permute(0, 2, 1)[:,None, :,:]).to(device)
+#                 y[start:start + x_batch.shape[0]] = y_batch
+#                 probs_test[idx,start:start + x_batch.shape[0],:] = F.softmax(model.forward(x_batch))
+#                 start = start + x_batch.shape[0]
+                
+#     torch.argmax(probs_test.mean(dim=0), dim=-1) != y 
+#     return                
 
 def all_subjects_experiment():
     subjects = range(1,10)
-    device = 'cuda:1'
-    res = {}
+    mean_errors = []
     for subject in subjects:
-        train_dataloader, test_dataloader, n_chans, input_time_length, _ = get_dataloaders(subjects=[subject], batch_size=64)
-        model = ShallowModel(in_chans=n_chans, input_time_length=input_time_length, n_classes=4, conv_nonlin=square, pool_nonlin=safe_log)
-        lr = 0.0625 * 0.01
-        n_epochs = 500
-        optim = torch.optim.AdamW(model.parameters(), lr=lr)
-        scheduler = CosineAnnealingLR(optim, T_max=n_epochs-1)
-        trainer = Trainer(model, optim, scheduler, train_dataloader,test_dataloader, device, verbose=False)
-        losses_train, errors_train, losses_test, errors_test = trainer.fit(n_epochs=n_epochs,test_interval=1)
-        best_epoch = np.argmin(losses_test)
-        res[subject] = errors_test[best_epoch]
-    for k in res:    
-        print("Subject {}, lowest_error {}".format(k, res[k]))
+        if not os.path.exists('checkpoints/bcic2a/subj{}'.format(subject)):
+            os.makedirs('checkpoints/bcic2a/subj{}'.format(subject))
+        models, mean_error = single_subject_exp(subject, n_epochs=500, n_ensambles=10, checkpoint_path='checkpoints/bcic2a/subj{}'.format(subject))
+        mean_errors.append(mean_error)
+    for subject in subjects:
+        print('Subject {}, {:.2f}'.format(subject,mean_errors[subject-1]))
         
-def single_subject_exp(subject, n_epochs=None):
+def single_subject_exp(subject, n_epochs=None, n_ensambles=1, checkpoint_path=None):
     device = 'cuda:0'
     # data_path = '/home/bogdan/ecom/BCI/datasets/bcic2A_mat/'
     # x,y = get_data(subject=9, training=True, PATH=data_path, order=('tr','t','ch'))
     # train_dataloader, test_dataloader = get_dataloaders(x, y, batch_size=64)
     # n_trials, input_time_length, n_chans, = x.shape
-    train_dataloader, test_dataloader, n_chans, input_time_length, ood_dataloader = get_dataloaders(subjects=[subject], batch_size=64, events=[0,1])
+    train_dataloader, test_dataloader, _, n_chans, input_time_length = get_dataloaders(subjects=[subject], batch_size=64, events=[0,1])
+    models = []
+    models_test_errors = []
+    for n_ensamble in range(n_ensambles):
+        model = ShallowModel(in_chans=n_chans, input_time_length=input_time_length, n_classes=2, conv_nonlin=square, pool_nonlin=safe_log)
+        # out = model.forward(x[:,None,:,:])
+        lr = 0.0625 * 0.01
+        if n_epochs is None:
+            n_epochs = 500
+        optim = torch.optim.AdamW(model.parameters(), lr=lr)
+        scheduler = CosineAnnealingLR(optim, T_max=n_epochs-1)
+        trainer = Trainer(model, optim, scheduler, train_dataloader,test_dataloader, device, verbose=False)
+        losses_train, errors_train, losses_test, errors_test = trainer.fit(n_epochs=n_epochs, test_interval=1)
+        models_test_errors.append(errors_test[-1].item())
+        
+        if checkpoint_path is not None:
+           torch.save(model.state_dict(), os.path.join(checkpoint_path, '{}.pth'.format(n_ensamble)))
+        models.append(model.to('cpu')) 
     
-    model = ShallowModel(in_chans=n_chans, input_time_length=input_time_length, n_classes=2, conv_nonlin=square, pool_nonlin=safe_log)
-    # out = model.forward(x[:,None,:,:])
-    lr = 0.0625 * 0.01
-    if n_epochs is None:
-        n_epochs = 500
-    optim = torch.optim.AdamW(model.parameters(), lr=lr)
-    scheduler = CosineAnnealingLR(optim, T_max=n_epochs-1)
-    trainer = Trainer(model, optim, scheduler, train_dataloader,test_dataloader, device, verbose=False)
-    trainer.fit(n_epochs=n_epochs,test_interval=1)
-    test_on_ood(model, ood_dataloader, device)
-    return model
-    
+    mean_error = np.mean(models_test_errors)
+    # print('Subject {}, {:.2f}'.format(subject,mean_error))
+    return models, mean_error
+ 
+
+     
+ 
 if __name__ == "__main__":
-    model = all_subjects_experiment()
+    single_subject_exp(subject=1, n_epochs=None, n_ensambles=1, checkpoint_path=None)
     

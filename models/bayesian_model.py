@@ -8,9 +8,11 @@ import metrics
 import numpy as np
 
 
+
 class LLBayesianShallowModel(ModuleWrapper):
     def __init__(self, in_chans, input_time_length, n_classes, n_filters_time=40, 
-                 filter_time_length=25, n_filters_spat=40, pool_time_length=75, pool_time_stride=15, conv_nonlin=None, pool_nonlin=None, priors=None) -> None:
+                 filter_time_length=25, n_filters_spat=40, pool_time_length=75, 
+                 pool_time_stride=15, conv_nonlin=None, pool_nonlin=None, priors=None, init_with_prior=False) -> None:
         super(LLBayesianShallowModel, self).__init__()
         self.n_classes = n_classes
         
@@ -32,22 +34,23 @@ class LLBayesianShallowModel(ModuleWrapper):
                 n_filters_spat,
                 n_classes,
                 (self.final_conv_length, 1),
-                bias=False, priors=priors
+                bias=False, priors=priors,init_with_prior=init_with_prior
             ),
         )
         self.model.add_module('flatten',nn.Flatten())
 
 class BayesianShallowModel(ModuleWrapper):
     def __init__(self, in_chans, input_time_length, n_classes, n_filters_time=40, 
-                 filter_time_length=25, n_filters_spat=10, pool_time_length=75, pool_time_stride=15, conv_nonlin=None, pool_nonlin=None, priors=None) -> None:
+                 filter_time_length=25, n_filters_spat=40, pool_time_length=75, 
+                 pool_time_stride=15, conv_nonlin=None, pool_nonlin=None, priors=None, init_with_prior=False) -> None:
         super(BayesianShallowModel, self).__init__()
         self.n_classes = n_classes
         
         self.model = nn.Sequential()
-        # self.model.add_module("conv_time", BBBConv2d(1, n_filters_time, (filter_time_length , 1), stride=1, bias=True, priors=priors))
-        # self.model.add_module("conv_spat", BBBConv2d(n_filters_time, n_filters_spat, (1, in_chans), stride=1, bias=True, priors=priors))
-        self.model.add_module("conv_time", nn.Conv2d(1, n_filters_time, (filter_time_length , 1), stride=1, bias=True))
-        self.model.add_module("conv_spat", BBBConv2d(n_filters_time, n_filters_spat, (1, in_chans), stride=1, bias=True, priors=priors))
+        self.model.add_module("conv_time", BBBConv2d(1, n_filters_time, (filter_time_length , 1), stride=1, bias=True, priors=priors,init_with_prior=init_with_prior))
+        self.model.add_module("conv_spat", BBBConv2d(n_filters_time, n_filters_spat, (1, in_chans), stride=1, bias=True, priors=priors, init_with_prior=init_with_prior))
+        # self.model.add_module("conv_time", nn.Conv2d(1, n_filters_time, (filter_time_length , 1), stride=1, bias=True))
+        # self.model.add_module("conv_spat", nn.Conv2d(n_filters_time, n_filters_spat, (1, in_chans), stride=1, bias=True))
         self.model.add_module("conv_nonlin", Expression(conv_nonlin))
         self.model.add_module('pool', nn.AvgPool2d(kernel_size=(pool_time_length, 1),
                                                                 stride=(pool_time_stride, 1)))
@@ -61,13 +64,10 @@ class BayesianShallowModel(ModuleWrapper):
                 n_filters_spat,
                 n_classes,
                 (self.final_conv_length, 1),
-                bias=False, priors=priors
+                bias=False, priors=priors,init_with_prior=init_with_prior
             ),
         )
         self.model.add_module('flatten',nn.Flatten())
-  
-
-
 
   
 class Trainer():
@@ -100,17 +100,18 @@ class Trainer():
     
     def test(self):
         self.model.eval()
-        self.model.sample(False)
         with torch.no_grad():
             test_nll, test_error = 0,0 
             for test_data in self.test_dataloader:
                 x_test, y_test = test_data[0], test_data[1]
                 y_test = torch.eye(self.model.n_classes)[y_test]
                 x_test, y_test = self.prepare_dim(x_test).to(self.device), y_test.to(self.device)
-                net_out, _ = self.model.forward(x_test)
-                logits_test = net_out
+                logits_test = torch.zeros((self.nmc_test, x_test.shape[0], self.model.n_classes),
+                             device=self.device)
+                for s in range(self.nmc_test):
+                    logits_test[s,:,:], _ = self.model.forward(x_test)
                 test_nll += -metrics.softmax_log_likelihood(logits_test, y_test).sum()
-                test_error += self.compute_error(logits_test, y_test)
+                test_error += self.compute_error(logits_test.mean(axis=0), y_test)
             test_nll /= len(self.test_dataloader)
             test_error /= len(self.test_dataloader)
         return test_nll, test_error   

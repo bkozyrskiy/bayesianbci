@@ -4,10 +4,27 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
 import os,sys
+from itertools import repeat
 
 from contextlib import contextmanager
 
 
+def get_all_data(data_loader):
+    """Get all data from a data loader."""
+    x, y = [], []
+    for x_batch, y_batch in data_loader:
+        x.append(x_batch)
+        y.append(y_batch.reshape([-1, 1]))
+
+    x = torch.cat(x, dim=0)
+    y = torch.cat(y, dim=0).reshape([-1])
+
+    return x, y
+
+def inf_loop(data_loader):
+    """wrapper function for endless data loader."""
+    for loader in repeat(data_loader):
+        yield from loader
 
 def logmeanexp(x, dim=None, keepdim=False):
     """Stable computation of log(mean(exp(x))"""

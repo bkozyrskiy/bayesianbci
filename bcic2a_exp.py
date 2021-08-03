@@ -1,9 +1,11 @@
-from moabb_dataset import get_dataloaders
-from layers import square, safe_log
+from dataloaders.bcic2a_dataset import get_dataloaders
+from models.layers import square, safe_log
 import os
 import torch
-from bayesian_model import LLBayesianShallowModel, Trainer
+from models.bayesian_model import LLBayesianShallowModel, Trainer, BayesianShallowModel
 import numpy as np
+from dataloaders.bcic2a_dataset import get_dataloaders
+from utils import suppress_stdout
 
 def all_subjects_experiment():
     subjects = range(1,10)
@@ -39,22 +41,30 @@ def single_subject_exp(subject):
     # x,y = get_data(subject=9, training=True, PATH=data_path, order=('tr','t','ch'))
     # train_dataloader, test_dataloader = get_dataloaders(x, y, batch_size=64)
     # n_trials, input_time_length, n_chans, = x.shape
-    train_dataloader, test_dataloader, n_chans, input_time_length, _ = get_dataloaders(subjects=[subject], batch_size=64, events=[0,1])
+    with suppress_stdout():
+        train_dataloader, test_dataloader, ood_dataloader, n_chans, input_time_length= get_dataloaders(subjects=[subject], batch_size=32, events=[0,1])
     priors = {
                 'prior_mu': 0,
-                'prior_sigma': 0.1,
-                'posterior_mu_initial': (0, 0.1),
+                'prior_sigma': 0.00001,
+                'posterior_mu_initial': (0, 0.0001),
                 'posterior_rho_initial': (-3, 0.1),
     }
-    model = LLBayesianShallowModel(in_chans=n_chans, input_time_length = input_time_length, n_classes=2, conv_nonlin=square, pool_nonlin=safe_log, priors=priors)
+    # model = LLBayesianShallowModel(in_chans=n_chans, input_time_length = input_time_length, n_classes=2, conv_nonlin=square, pool_nonlin=safe_log, priors=priors)
+    model = BayesianShallowModel(in_chans=n_chans, input_time_length=input_time_length, n_classes=2, conv_nonlin=square, pool_nonlin=safe_log, priors=priors, init_with_prior=True)
     # out = model.forward(x[:,None,:,:])
     lr = 0.0625 * 0.01
-    nmc_train, nmc_test = 1, 1
+    nmc_train, nmc_test = 1, 5
     n_epochs = 500
     optim = torch.optim.AdamW(model.parameters(), lr=lr)
     # scheduler = CosineAnnealingLR(optim, T_max=n_epochs-1)
     trainer = Trainer(model, optim, train_dataloader=train_dataloader, beta_type="Blundell", nmc_train=nmc_train, nmc_test=nmc_test,
                       test_dataloader=test_dataloader, device=device, verbose=True)
     trainer.fit(n_epochs=n_epochs,test_interval=1)
-    pass
+    return model
     # reliability_plot(model, test_dataloader, device)
+    
+if __name__ == '__main__':
+    subject = 5
+    model = single_subject_exp(subject)
+    model_checkpoints = 'checkpoints/'
+    torch.save(model.state_dict(), os.path.join(model_checkpoints, 'subj{}.pth'.format(subject)))
