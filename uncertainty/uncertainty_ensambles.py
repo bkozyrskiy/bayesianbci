@@ -13,23 +13,8 @@ from models.baseline_deep_model import DeepModel
 from dataloaders.bcic2a_dataset import get_dataloaders
 from models.layers import square, safe_log
 from utils import suppress_stdout
-
-def get_model_predictions(model, dataloader, n_classes, device):
-    model.to(device)
-    model.eval()
-    predictions = torch.empty((len(dataloader.dataset), n_classes),device=device)
-    start = 0
-    y_total = np.empty(len(dataloader.dataset))
-    for data in iter(dataloader):
-        x = data[0]
-        y_total[start:start+x.shape[0]] = data[1].numpy()
-        x = x[:,None,:,:].permute(0,1,3,2).to(device)
-        predictions[start:start+x.shape[0], :] = F.softmax(model(x),dim=-1)
-        start = start+x.shape[0]
-    return predictions.detach().cpu().numpy(), y_total 
-        
-def get_error(predicions, y):
-    return (np.argmax(predicions.mean(axis=0), axis=-1) != y).mean()
+from uncertainty_utils import get_model_predictions, get_error
+ 
 
 def get_ensamble_uncertainties(subject, test_dataloader, ood_dataloader, events, n_chans, input_time_length, model_type, path_to_checkpoints=None, device='cuda:0'):
     if path_to_checkpoints is None:

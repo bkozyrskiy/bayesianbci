@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os,sys
 from itertools import repeat
+from pathlib import Path
 
 from contextlib import contextmanager
 
@@ -25,6 +26,16 @@ def inf_loop(data_loader):
     """wrapper function for endless data loader."""
     for loader in repeat(data_loader):
         yield from loader
+        
+def ensure_dir(dirname):
+    """Check whether a given directory was created; if not, create a new one.
+    Args:
+        dirname: string, path to the directory.
+    """
+    dirname = Path(dirname)
+    if not dirname.is_dir():
+        dirname.mkdir(parents=True, exist_ok=False)
+
 
 def logmeanexp(x, dim=None, keepdim=False):
     """Stable computation of log(mean(exp(x))"""

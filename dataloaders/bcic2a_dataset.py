@@ -61,11 +61,16 @@ def get_dataloaders(subjects, batch_size, events=None, permute=None, insert_rgb_
     if permute is None:
         permute = (0,1,2)
     
-    tmp_train_data = list(zip(*[(torch.Tensor(elem[0][None,:,:]).permute(*permute), torch.Tensor([elem[1]]).long()) for elem in train_set]))
+    tmp_train_data = list(zip(*[(torch.Tensor(elem[0][None,:,:]), torch.Tensor([elem[1]]).long()) for elem in train_set]))
     Xtr, ytr = torch.cat(tmp_train_data[0], dim=0), torch.cat(tmp_train_data[1], dim=0)
     
-    tmp_val_data = list(zip(*[(torch.Tensor(elem[0][None,:,:]).permute(*permute), torch.Tensor([elem[1]]).long()) for elem in valid_set]))
+    tmp_val_data = list(zip(*[(torch.Tensor(elem[0][None,:,:]), torch.Tensor([elem[1]]).long()) for elem in valid_set]))
     Xval, yval = torch.cat(tmp_val_data[0], dim=0), torch.cat(tmp_val_data[1], dim=0)
+    
+    n_chans, input_time_length = Xtr.shape[1], Xtr.shape[2]
+    
+    Xtr, Xval = Xtr.permute(*permute), Xval.permute(*permute)
+    
     if insert_rgb_dim:
         Xtr, Xval = Xtr[:,None,:,:], Xval[:,None,:,:] 
     
@@ -111,8 +116,6 @@ def get_dataloaders(subjects, batch_size, events=None, permute=None, insert_rgb_
     else:
         ood_dataloader = None
     
-    elem = next(iter(train_dataloader))
-    n_chans, input_time_length = elem[0].shape[1], elem[0].shape[2]
     return train_dataloader, test_dataloader, ood_dataloader, n_chans, input_time_length
 
 

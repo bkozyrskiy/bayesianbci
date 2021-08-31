@@ -44,9 +44,6 @@ class ShallowModel(nn.Module):
     
     def forward(self, x):
         return self.model(x)
-    
-
-
 
 class Trainer():
     def __init__(self, model, optim, scheduler, train_dataloader, test_dataloader, device, verbose=False) -> None:

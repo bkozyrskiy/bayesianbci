@@ -46,7 +46,8 @@ class LikBernoulli(LikelihoodModule):
 class LikMultinomial(LikelihoodModule):
     def __init__(self):
         super(LikMultinomial, self).__init__()
-        self.loss = torch.nn.NLLLoss(reduction='sum')
+        # self.loss = torch.nn.NLLLoss(reduction='sum')
+        self.loss = torch.nn.CrossEntropyLoss(reduction='sum')
 
     def loglik(self, fx, y):
         return -self.loss(fx, y)

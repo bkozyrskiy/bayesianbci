@@ -1,36 +1,49 @@
 import torch
 import numpy as np
-from SGHMC_optimizer import AdaptiveSGHMC
+
 from itertools import islice
 import logging
 
-
+import glob
 import copy
-import os, sys, tqdm 
+import os, sys
+from tqdm import tqdm 
 
 PACKAGE_PARENT = '..'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 from dataloaders.bcic2a_dataset import get_dataloaders
-from sghmc_utils import accuracy, nll
+from SGHMC.sghmc_utils import accuracy, nll
 from models.baseline_shallow_model import ShallowModel
 from models.layers import safe_log, square
 from SGHMC.priors import PriorGaussian
-from SGHMC.likelihoods import LikBernoulli
-from utils import inf_loop, get_all_data, suppress_stdout
+from SGHMC.likelihoods import LikMultinomial
+from SGHMC.SGHMC_optimizer import AdaptiveSGHMC
+from utils import inf_loop, get_all_data, suppress_stdout, ensure_dir
 
 
-class SGHMCTrainer():
-    def __init__(self, model, likelihood, prior, checkpoint_dir, device) -> None:
+class SGHMCBayesianNet():
+    def __init__(self, model, likelihood, prior, checkpoint_dir, weights_format, device) -> None:
         self.model = model
         
         self.lik_module = likelihood
-        self.prior = prior
+        self.prior_module = prior
         self.sampled_weights = []
         self.device = device
         self.checkpoint_dir = checkpoint_dir
+        self.weights_format = weights_format
         self.model.to(self.device)
+        logging.basicConfig()
+        self.logger = logging.getLogger()
+        self.logger.setLevel(logging.INFO)
         
+        self.is_trained = False
+        self.num_samples = 0
+        self.step = 0
+        self.num_saved_sets_weights = 0
+        self.sampled_weights_dir = os.path.join(self.checkpoint_dir,
+                                                "sampled_weights")
+        ensure_dir(self.sampled_weights_dir)
 
     
     @property
@@ -204,7 +217,7 @@ class SGHMCTrainer():
 
                 for x_batch, y_batch in test_data_loader_:
                     x_batch = x_batch.to(self.device)
-                    predictions.append(self.model.predict(x_batch).float())
+                    predictions.append(self.model(x_batch).float())
 
                 return torch.cat(predictions, dim=0)
 
@@ -214,6 +227,7 @@ class SGHMCTrainer():
         if all_sampled_weights:
             sampled_weights_loader = self._load_all_sampled_weights()
             for weights in tqdm(sampled_weights_loader):
+            # for weights in sampled_weights_loader:
                 network_outputs.append(network_predict(test_data_loader,
                                                        weights=weights))
         else:
@@ -246,7 +260,7 @@ class SGHMCTrainer():
         def network_predict(x_test_, weights, device):
             with torch.no_grad():
                 self.network_weights = weights
-                return self.model.predict(x_test_.to(device))
+                return self.model(x_test_.to(device))
 
         # Make predictions
         network_outputs = []
@@ -296,7 +310,7 @@ class SGHMCTrainer():
         """
         if not continue_training:
             # Burn-in steps
-            logging.info("Burn-in steps")
+            self.logger.info("Burn-in steps")
             self.train(data_loader=data_loader, lr=lr, epsilon=epsilon,
                        mdecay=mdecay, num_burn_in_steps=num_burn_in_steps)
 
@@ -305,7 +319,7 @@ class SGHMCTrainer():
 
         best_nll = None
         preds = [] # List containing prediction
-        logging.info("Start sampling")
+        self.logger.info("Start sampling")
         for i in range(num_samples // validate_every_n_samples):
             self.train(data_loader=data_loader, num_burn_in_steps=0,
                        num_samples=validate_every_n_samples,
@@ -321,7 +335,7 @@ class SGHMCTrainer():
 
             # Evaluate the sampled weights on validation data
             mean_preds = torch.cat(preds, dim=0).mean(axis=0)
-            nll_ = nll(mean_preds, valid_targets)
+            nll_ = self.lik_module(mean_preds, valid_targets) / valid_targets.shape[0]
             accuracy_ = accuracy(mean_preds, valid_targets)
 
             # Save the best checkpoint
@@ -329,14 +343,14 @@ class SGHMCTrainer():
                 best_nll = nll_
                 self._save_checkpoint(mode="best")
 
-            logging.info("Validation: NLL = {:.5f} Acc = {:.4f}".format(
+            self.logger.info("Validation: NLL = {:.5f} Acc = {:.4f}".format(
                 nll_, accuracy_))
             self._save_checkpoint(mode="last")
 
             # Clear the cached weights
             self.sampled_weights.clear()
 
-        logging.info("Finish")
+        self.logger.info("Finish")
 
     
     def _save_sampled_weights(self):
@@ -350,17 +364,85 @@ class SGHMCTrainer():
         torch.save({"sampled_weights": self.sampled_weights}, file_path)
         self.num_saved_sets_weights += 1
         
+    def _print_evaluations(self, x, y, train=True):
+        """Evaluate the sampled weights on training/validation data and
+            during the training log the results.
+        Args:
+            x: numpy array, shape [batch_size, num_features], the input data.
+            y: numpy array, shape [batch_size, 1], the corresponding targets.
+            train: bool, indicate whether we're evaluating on the training data.
+        """
+        preds = self.predict(x, all_sampled_weights=(not train))
+        acc_ = accuracy(preds, y)
+        # nll_ = nll(preds, y)
+        nll_ = self.lik_module(preds,y)/y.shape[0]
+
+        if train:
+            self.logger.info("Samples # {:5d} : NLL = {:.5f} "
+                "Acc = {:.4f} ".format(self.num_samples, nll_, acc_))
+        else:
+            self.logger.info("Validation: NLL = {:.5f} Acc = {:.4f}".format(
+                nll_, acc_))
         
+    def _save_checkpoint(self, mode="best"):
+        """Save sampled weights, sampler state into a single checkpoint file.
+        Args:
+            mode: str, the type of checkpoint to be saved. Possible values
+                `last`, `best`.
+        """
+        if mode == "best":
+            file_name = "checkpoint_best.pth"
+        elif mode == "last":
+            file_name = "checkpoint_last.pth"
+        else:
+            file_name = "checkpoint_step_{}.pth".format(self.step)
+
+        file_path = os.path.join(self.checkpoint_dir, file_name)
+
+        torch.save({
+            "step": self.step,
+            "num_samples": self.num_samples,
+            "num_saved_sets_weights": self.num_saved_sets_weights,
+            "sampler_params": self.sampler_params,
+            "model_state_dict": self.model.state_dict(),
+            "sampler_state_dict": self.sampler.state_dict(),
+        }, file_path)
+        
+    def _load_all_sampled_weights(self):
+        """Load all the sampled weights from files.
+        Returns: a generator for loading sampled weights.
+        """
+        def load_weights(file_path):
+            checkpoint = torch.load(file_path)
+            sampled_weights = checkpoint["sampled_weights"]
+
+            return sampled_weights
+
+        def sampled_weights_loader(sampled_weights_dir):
+            file_paths = glob.glob(os.path.join(sampled_weights_dir,
+                                                "sampled_weights*"))
+            for file_path in file_paths:
+                for weights in load_weights(file_path):
+                    yield weights
+
+                self.network_weights.clear()
+                if "cuda" in str(self.device):
+                    torch.cuda.empty_cache()
+
+        return sampled_weights_loader(self.sampled_weights_dir)
+
 if __name__ == '__main__':
     device = 'cuda:0'
     
-    subject = 5
-    checkpoint_dir = 'checkpoints/shallow_bcic/{}'.format(subject)
-    with suppress_stdout():
-        train_dataloader, test_dataloader, _, n_chans, input_time_length = get_dataloaders(subjects=[subject], batch_size=64, 
-                                                                                           events=[0,1], permute=(0,2,1), insert_rgb_dim=True)
-    model = ShallowModel(in_chans=n_chans, input_time_length=input_time_length, n_classes=2, conv_nonlin=square, pool_nonlin=safe_log)
-    prior = PriorGaussian(sw2=1) #
-    likelihood = LikBernoulli()
-    trainer = SGHMCTrainer(model, likelihood, prior, checkpoint_dir, device)
-    trainer.train_and_evaluate(data_loader=train_dataloader, valid_data_loader=test_dataloader)
+    # subject = 8
+    for subject in [3,4,5,6,9]:
+        checkpoint_dir = os.path.join(SCRIPT_DIR, PACKAGE_PARENT, 'checkpoints/bcic_shallow_SGHMC/subj{}'.format(subject))
+        with suppress_stdout():
+            train_dataloader, test_dataloader, _, n_chans, input_time_length = get_dataloaders(subjects=[subject], batch_size=64,
+                                                                                               events=[0,1], permute=(0,2,1), insert_rgb_dim=True)
+        model = ShallowModel(in_chans=n_chans, input_time_length=input_time_length, n_classes=2, conv_nonlin=square, pool_nonlin=safe_log)
+
+        prior = PriorGaussian(sw2=1) #
+        likelihood = LikMultinomial()
+        net = SGHMCBayesianNet(model, likelihood, prior, checkpoint_dir, weights_format='state_dict', device=device)
+        net.train_and_evaluate(data_loader=train_dataloader, valid_data_loader=test_dataloader)
